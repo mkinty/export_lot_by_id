@@ -1,0 +1,17 @@
+[project]
+name = "lot-export-project"
+version = "0.1.0"
+description = "Export LOT — Projet SNA"
+requires-python = ">=3.13"
+
+dependencies = [
+    "openpyxl>=3.1",
+    "pillow>=12.3.0",
+    "pyinstaller>=6.21.0",
+    "PySide6>=6.7",
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
