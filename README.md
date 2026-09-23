@@ -24,8 +24,8 @@ lot_export/
 │   ├── lot_naming.py          #   construction/validation du nom de dossier LOT
 │   └── export_service.py      #   orchestration de la copie (injectable/mockable)
 ├── gui/                       # Présentation uniquement — délègue tout aux services
-│   ├── theme.py                #   couleurs & feuille de style QSS centralisées
-│   └── main_window.py         #   fenêtre PySide6 (QWidget) + ExportWorker (QThread)
+│   ├── theme.py                #   couleurs, polices & styles ttk centralisés
+│   └── main_window.py         #   fenêtre Tkinter (tk.Tk) + ExportWorker (thread)
 └── main.py                    # Point d'entrée : câble config + services + UI
 ```
 
@@ -43,15 +43,14 @@ d'erreurs) sans jamais ouvrir de fenêtre, ni installer Tkinter/CustomTkinter.
   disque sans avoir besoin de le provoquer réellement.
 - **Thread-safety propre** : le thread d'export ne touche plus aux widgets
   directement (source de bugs/plantages aléatoires dans la version d'origine).
-  `ExportWorker` est un `QThread` qui communique avec l'UI **uniquement** via
-  des signaux Qt (`log`, `progress`, `finished_export`) — Qt garantit que les
-  slots connectés s'exécutent dans le thread de l'UI, sans file d'attente
-  manuelle ni polling.
-- **Interface modernisée avec PySide6 (Qt)** : rendu natif, moderne, avec une
-  vraie feuille de style QSS (l'équivalent CSS pour Qt) centralisée dans
-  `gui/theme.py` — un seul fichier à modifier pour changer les couleurs, sans
-  toucher au code des widgets. PySide6 est la distribution officielle de Qt
-  pour Python (licence LGPL), robuste et très répandue en entreprise.
+  `ExportWorker` est un `threading.Thread` qui communique avec l'UI
+  **uniquement** via une `queue.Queue` d'événements (`log`, `progress`,
+  `finished`), dépilée par la fenêtre avec `after()` dans le thread de l'UI.
+- **Interface Tkinter à thème sombre** : Tkinter est inclus dans la
+  bibliothèque standard Python (aucune dépendance GUI lourde, exécutable
+  PyInstaller beaucoup plus léger). Palette, polices et styles ttk sont
+  centralisés dans `gui/theme.py` — un seul fichier à modifier pour changer
+  les couleurs, sans toucher au code des widgets.
 - **`ExportStatus` en enum** plutôt que des chaînes libres → moins d'erreurs
   de frappe, autocomplétion, exhaustivité vérifiable.
 
@@ -107,8 +106,8 @@ construction du nom de dossier LOT. Aucun test ne dépend de Tkinter.
 - Nouvelle règle de nommage/recherche de fichier → modifier uniquement
   `file_locator.py` + son test.
 - Nouveau format de code commune → modifier uniquement `commune_parser.py`.
-- Nouveau thème de couleurs → modifier uniquement `gui/theme.py` (la fonction
-  `build_stylesheet()` régénère tout le QSS).
+- Nouveau thème de couleurs → modifier uniquement `gui/theme.py` (`Palette`,
+  `Fonts` et la fonction `apply_theme()`).
 - Export vers un autre support (ex: zip au lieu de simple copie) → ajouter une
   nouvelle implémentation de `copy_fn` injectée dans `ExportService`, sans
   toucher à l'UI.

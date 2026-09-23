@@ -1,14 +1,10 @@
 """
 Point d'entrée de l'application.
-Assemble les dépendances (config, services) et lance l'interface graphique PySide6.
+Assemble les dépendances (config, services) et lance l'interface graphique Tkinter.
 
 Lancer avec :  python -m lot_export.main
 """
 from __future__ import annotations
-
-import sys
-
-from PySide6.QtWidgets import QApplication
 
 from .config import config_file_path, load_config
 from .gui.main_window import LotExportWindow
@@ -26,10 +22,8 @@ def build_window() -> LotExportWindow:
 
 
 def main() -> None:
-    app = QApplication(sys.argv)
     window = build_window()
-    window.show()
-    sys.exit(app.exec())
+    window.mainloop()
 
 
 if __name__ == "__main__":

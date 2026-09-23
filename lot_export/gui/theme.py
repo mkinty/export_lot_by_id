@@ -1,10 +1,11 @@
 """
-Palette de couleurs et feuille de style (QSS) centralisées pour l'interface PySide6.
+Palette de couleurs, polices et styles ttk centralisés pour l'interface Tkinter.
 Un seul endroit à modifier pour changer tout le thème visuel de l'application.
 """
 import platform
-
+import tkinter as tk
 from dataclasses import dataclass
+from tkinter import ttk
 
 
 @dataclass(frozen=True)
@@ -38,127 +39,49 @@ elif platform.system() == "Darwin":  # macOS
     FONT_MONO = "Menlo"
 
 else:  # Linux
-    FONT_FAMILY = "Sans Serif"
-    FONT_MONO = "Monospace"
+    FONT_FAMILY = "DejaVu Sans"
+    FONT_MONO = "DejaVu Sans Mono"
 
 
-def build_stylesheet(p: Palette = PALETTE) -> str:
-    """Génère la feuille de style QSS appliquée à toute la fenêtre.
+@dataclass(frozen=True)
+class Fonts:
+    base: tuple = (FONT_FAMILY, 11)
+    muted: tuple = (FONT_FAMILY, 10)
+    dim: tuple = (FONT_FAMILY, 9)
+    title: tuple = (FONT_FAMILY, 14, "bold")
+    large: tuple = (FONT_FAMILY, 14, "bold")
+    button: tuple = (FONT_FAMILY, 12, "bold")
+    mono: tuple = (FONT_MONO, 10)
 
-    Les rôles (role="muted", role="dim", ...) permettent de cibler des
-    QLabel sans dupliquer de styles inline dans le code Python de l'UI.
-    """
-    return f"""
-        QWidget {{
-            background-color: {p.bg};
-            color: {p.text};
-            font-family: "{FONT_FAMILY}";
-            font-size: 11pt;
-        }}
 
-        #Header {{
-            background-color: {p.surface};
-        }}
-        #HeaderTitle {{
-            font-size: 14pt;
-            font-weight: 600;
-            color: {p.text};
-        }}
+FONTS = Fonts()
 
-        QLabel[role="muted"] {{
-            color: {p.text_muted};
-            font-size: 10pt;
-        }}
-        QLabel[role="dim"] {{
-            color: {p.text_dim};
-            font-size: 9pt;
-        }}
-        QLabel[role="preview-warning"] {{
-            color: {p.warning};
-            font-size: 9pt;
-        }}
-        QLabel#LotPrefix {{
-            color: {p.info};
-            font-size: 14pt;
-            font-weight: 600;
-        }}
+# Couleur de texte associée à chaque "rôle" de label (équivalent des sélecteurs QLabel[role=...]).
+LABEL_ROLES = {
+    "muted": (PALETTE.text_muted, FONTS.muted),
+    "dim": (PALETTE.text_dim, FONTS.dim),
+    "preview-warning": (PALETTE.warning, FONTS.dim),
+}
 
-        QLineEdit, QTextEdit {{
-            background-color: {p.input_bg};
-            border: 1px solid {p.border};
-            border-radius: 6px;
-            padding: 6px 8px;
-            selection-background-color: {p.accent};
-        }}
-        QLineEdit#LotEntry {{
-            font-size: 14pt;
-            font-weight: 600;
-        }}
 
-        QTextEdit#LogConsole {{
-            background-color: {p.console_bg};
-            color: {p.success};
-            font-family: "{FONT_MONO}";
-            font-size: 10pt;
-            border: 1px solid {p.border};
-        }}
+def apply_theme(root: tk.Misc, p: Palette = PALETTE) -> None:
+    """Configure les options par défaut des widgets tk et les styles ttk utilisés."""
+    root.configure(background=p.bg)
+    root.option_add("*Font", FONTS.base)
+    root.option_add("*Background", p.bg)
+    root.option_add("*Foreground", p.text)
 
-        QPushButton#RunButton {{
-            background-color: {p.accent};
-            color: white;
-            border: none;
-            border-radius: 8px;
-            padding: 12px;
-            font-size: 12pt;
-            font-weight: 600;
-        }}
-        QPushButton#RunButton:hover {{
-            background-color: {p.accent_hover};
-        }}
-        QPushButton#RunButton:pressed {{
-            background-color: {p.accent_pressed};
-        }}
-        QPushButton#RunButton:disabled {{
-            background-color: {p.accent_disabled};
-            color: {p.text_dim};
-        }}
-
-        #FoldersPanel {{
-            background-color: {p.surface};
-            border: 1px solid {p.border};
-            border-radius: 8px;
-        }}
-        #FoldersPanel QLabel {{
-            background-color: transparent;
-        }}
-        #FoldersPanel QLineEdit {{
-            font-size: 10pt;
-        }}
-        QPushButton#BrowseButton {{
-            background-color: {p.input_bg};
-            color: {p.text};
-            border: 1px solid {p.border};
-            border-radius: 6px;
-            padding: 5px 12px;
-            font-size: 10pt;
-        }}
-        QPushButton#BrowseButton:hover {{
-            border-color: {p.accent};
-        }}
-        QPushButton#BrowseButton:disabled {{
-            color: {p.text_dim};
-        }}
-
-        QProgressBar {{
-            background-color: {p.input_bg};
-            border: none;
-            border-radius: 4px;
-            height: 10px;
-            text-align: center;
-            color: transparent;
-        }}
-        QProgressBar::chunk {{
-            background-color: {p.accent};
-            border-radius: 4px;
-        }}
-    """
+    style = ttk.Style(root)
+    style.theme_use("clam")  # seul thème natif dont les couleurs sont entièrement personnalisables
+    style.configure(
+        "Accent.Horizontal.TProgressbar",
+        troughcolor=p.input_bg, background=p.accent,
+        bordercolor=p.input_bg, lightcolor=p.accent, darkcolor=p.accent,
+        thickness=10,
+    )
+    style.configure(
+        "Vertical.TScrollbar",
+        background=p.surface, troughcolor=p.console_bg, bordercolor=p.console_bg,
+        lightcolor=p.surface, darkcolor=p.surface, arrowcolor=p.text_muted,
+    )
+    style.map("Vertical.TScrollbar", background=[("active", p.border)])
