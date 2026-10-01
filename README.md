@@ -19,7 +19,9 @@ lot_export/
 ├── services/                  # Logique métier PURE — zéro dépendance UI
 │   ├── commune_parser.py      #   extraction des codes commune (regex)
 │   ├── error_id_parser.py     #   extraction des ID erreur groupés par code INSEE
+│   ├── address_parser.py      #   extraction des adresses <INSEE>_<adresse> groupées par code INSEE
 │   ├── excel_filter.py        #   filtrage des lignes de la feuille Audit (openpyxl)
+│   ├── excel_merger.py        #   fusion de plusieurs fichiers audit en un seul classeur
 │   ├── file_locator.py        #   recherche des fichiers audit_*.xlsx
 │   ├── lot_naming.py          #   construction/validation du nom de dossier LOT
 │   └── export_service.py      #   orchestration de la copie (injectable/mockable)
@@ -65,6 +67,24 @@ d'erreurs) sans jamais ouvrir de fenêtre, ni installer Tkinter/CustomTkinter.
   fait partie de la liste. Les autres feuilles sont conservées, les formules
   sont recalées sur leur nouvelle ligne. Les ID absents du fichier sont
   signalés dans le journal.
+- **Adresse** : on colle une adresse par ligne, préfixée du code INSEE
+  (`05094_495 CHEMIN DE PIGE BOUIN 05700 NOSSAGE ET BENEVENT`). Même principe
+  que l'export par ID erreur, mais sur la colonne `adresse` de la feuille
+  `Audit`. La comparaison ignore la casse, les accents et les espaces
+  multiples ; toutes les lignes ayant une adresse demandée sont conservées.
+
+## Fichier(s) Excel produits
+
+Quel que soit le mode, on choisit la sortie :
+
+- **Un fichier par code INSEE** (par défaut) : un `audit_<INSEE>.xlsx` par commune.
+- **Un seul fichier pour tout le LOT** : toutes les communes sont regroupées
+  dans `LOTxx/audit_LOTxx.xlsx`. Le premier fichier sert de modèle (mise en
+  forme, largeurs de colonnes) ; pour chaque feuille (`Audit`, `DGFIP`, `IPE`,
+  `BAN`...), les lignes des communes suivantes sont ajoutées à la suite, sans
+  répéter l'en-tête, avec les formules recalées. Les feuilles identiques dans
+  tous les fichiers (listes déroulantes) ne sont gardées qu'une fois, et les
+  lignes « modèle » ne contenant que des formules sont retirées.
 
 ## Configuration des dossiers
 

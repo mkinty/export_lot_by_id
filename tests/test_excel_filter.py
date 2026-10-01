@@ -63,3 +63,22 @@ def test_raises_when_column_missing(tmp_path: Path):
 
     with pytest.raises(ExcelFilterError):
         filter_audit_rows(tmp_path / "audit.xlsx", tmp_path / "out.xlsx", ["74143_1"])
+
+
+def test_filters_on_address_column_ignoring_case_accents_and_spaces(tmp_path: Path):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Audit"
+    ws.append(["INSEE", "Adresse", "ID erreur"])
+    ws.append(["05094", "495 Chemin de Pige Bouin 05700 Nossage et Bénévent", "05094_1"])
+    ws.append(["05094", "3 ROUTE DU COL 05700 NOSSAGE ET BENEVENT", "05094_2"])
+    ws.append(["05094", "495 CHEMIN DE PIGE BOUIN 05700 NOSSAGE ET BENEVENT", "05094_3"])
+    wb.save(tmp_path / "audit.xlsx")
+    wanted = ["495 CHEMIN DE PIGE  BOUIN 05700 NOSSAGE ET BENEVENT", "1 RUE ABSENTE"]
+
+    result = filter_audit_rows(tmp_path / "audit.xlsx", tmp_path / "out.xlsx", wanted, "adresse")
+
+    assert result.kept_ids == [wanted[0]]
+    assert result.missing_ids == ["1 RUE ABSENTE"]
+    ids = [row[2] for row in load_workbook(tmp_path / "out.xlsx")["Audit"].iter_rows(min_row=2, values_only=True)]
+    assert ids == ["05094_1", "05094_3"]

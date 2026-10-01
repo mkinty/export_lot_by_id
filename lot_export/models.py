@@ -34,6 +34,9 @@ class ExportItem:
 class ExportSummary:
     """Bilan complet d'un export par lot (agrège les ExportItem)."""
     items: list[ExportItem] = field(default_factory=list)
+    # Renseignés uniquement pour un export en fichier unique
+    merged_file: Optional[Path] = None
+    merged_rows: int = 0
 
     @property
     def total(self) -> int:

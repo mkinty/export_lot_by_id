@@ -14,6 +14,7 @@ import os
 import queue
 import threading
 import tkinter as tk
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Dict, List, Optional
@@ -22,6 +23,7 @@ from PIL import Image, ImageTk
 
 from ..config import AppConfig, save_config
 from ..models import ExportSummary
+from ..services.address_parser import extract_addresses
 from ..services.commune_parser import extract_commune_codes
 from ..services.error_id_parser import extract_error_ids
 from ..services.export_service import ExportService
@@ -34,6 +36,43 @@ STATUS_ICONS = {"success": "✅", "not_found": "⚠️ ", "error": "❌"}
 POLL_INTERVAL_MS = 50
 
 
+@dataclass(frozen=True)
+class FilterMode:
+    """Mode d'export filtré : quelles valeurs saisir, comment les lire et quel export lancer."""
+    radio_label: str
+    unit: str
+    prompt: str
+    placeholder: str
+    invalid_message: str
+    parse: Callable[[str], Dict[str, List[str]]]
+    export: Callable[[ExportService], Callable[..., ExportSummary]]
+
+
+# Modes filtrés (le mode "communes" copie les fichiers complets).
+FILTER_MODES: Dict[str, FilterMode] = {
+    "error_ids": FilterMode(
+        radio_label="ID erreur (lignes filtrées)",
+        unit="ID erreur",
+        prompt="Collez vos ID erreur (ex : 74143_1, 74143_2) :",
+        placeholder="74143_1\n74143_2\n38068_207",
+        invalid_message="Aucun ID erreur valide détecté (format attendu : 74143_1).",
+        parse=extract_error_ids,
+        export=lambda service: service.export_by_error_ids,
+    ),
+    "addresses": FilterMode(
+        radio_label="Adresse (lignes filtrées)",
+        unit="adresse(s)",
+        prompt="Collez vos adresses, une par ligne (format : <code INSEE>_<adresse>) :",
+        placeholder="05094_495 CHEMIN DE PIGE BOUIN 05700 NOSSAGE ET BENEVENT\n"
+                    "74143_12 RUE DES ALPES 74000 ANNECY",
+        invalid_message="Aucune adresse valide détectée "
+                        "(format attendu : 05094_495 CHEMIN DE PIGE BOUIN 05700 NOSSAGE ET BENEVENT).",
+        parse=extract_addresses,
+        export=lambda service: service.export_by_addresses,
+    ),
+}
+
+
 class ExportWorker(threading.Thread):
     """Exécute l'export dans un thread séparé et notifie l'UI via une file d'événements."""
 
@@ -44,7 +83,9 @@ class ExportWorker(threading.Thread):
             communes: List[str],
             lot_dir: Path,
             events: "queue.Queue[tuple]",
-            error_ids: Optional[Dict[str, List[str]]] = None,
+            filter_mode: Optional[FilterMode] = None,
+            filter_values: Optional[Dict[str, List[str]]] = None,
+            single_file_name: Optional[str] = None,
     ):
         super().__init__(daemon=True)
         self.export_service = export_service
@@ -52,8 +93,11 @@ class ExportWorker(threading.Thread):
         self.communes = communes
         self.lot_dir = lot_dir
         self.events = events
-        # Si renseigné : {code INSEE: [ID erreur]} -> export filtré sur ces lignes uniquement
-        self.error_ids = error_ids
+        # Si renseigné : {code INSEE: [valeurs]} -> export filtré sur ces lignes uniquement
+        self.filter_mode = filter_mode
+        self.filter_values = filter_values
+        # Si renseigné : toutes les communes sont regroupées dans ce fichier Excel unique
+        self.single_file_name = single_file_name
 
     def _log(self, message: str) -> None:
         self.events.put(("log", message))
@@ -68,23 +112,29 @@ class ExportWorker(threading.Thread):
 
     def _export(self) -> ExportSummary:
         on_progress = lambda done, total, label: self.events.put(("progress", done, total, label))
-        if self.error_ids is None:
+        if self.filter_mode is None:
             self._log(f"🚀 LOT{self.lot_number} — Export de {len(self.communes)} commune(s)...")
             self._log("─" * 45)
-            summary: ExportSummary = self.export_service.export(self.communes, self.lot_dir, on_progress)
+            summary: ExportSummary = self.export_service.export(
+                self.communes, self.lot_dir, on_progress, self.single_file_name)
         else:
-            nb_ids = sum(len(ids) for ids in self.error_ids.values())
-            self._log(f"🚀 LOT{self.lot_number} — Export de {nb_ids} ID erreur "
-                      f"sur {len(self.error_ids)} commune(s)...")
+            nb_values = sum(len(values) for values in self.filter_values.values())
+            self._log(f"🚀 LOT{self.lot_number} — Export de {nb_values} {self.filter_mode.unit} "
+                      f"sur {len(self.filter_values)} commune(s)...")
             self._log("─" * 45)
-            summary = self.export_service.export_by_error_ids(self.error_ids, self.lot_dir, on_progress)
+            export = self.filter_mode.export(self.export_service)
+            summary = export(self.filter_values, self.lot_dir, on_progress, self.single_file_name)
 
         for item in summary.items:
             icon = STATUS_ICONS[item.status.value]
             self._log(f"  {icon} {item.commune} — {item.message}")
 
         self._log("─" * 45)
-        if summary.has_success:
+        if summary.merged_file is not None:
+            self._log(f"🎉 {summary.success_count}/{summary.total} commune(s) regroupée(s) dans "
+                      f"{summary.merged_file.name} ({summary.merged_rows} ligne(s) Audit)")
+            self._log(f"📂 {self.lot_dir}")
+        elif summary.has_success:
             self._log(f"🎉 {summary.success_count}/{summary.total} fichier(s) copié(s)")
             self._log(f"📂 {self.lot_dir}")
         else:
@@ -236,13 +286,24 @@ class LotExportWindow(tk.Tk):
     def _build_commune_input(self, parent: tk.Widget) -> tk.Widget:
         container = tk.Frame(parent, bg=PALETTE.bg)
 
+        self._label(container, "Exporter par :", "muted").pack(anchor="w")
         mode_row = tk.Frame(container, bg=PALETTE.bg)
-        mode_row.pack(anchor="w", pady=(0, 4))
-        self._label(mode_row, "Exporter par :", "muted").pack(side="left", padx=(0, 6))
+        mode_row.pack(anchor="w", pady=(0, 8))
         self.var_mode = tk.StringVar(value="communes")
-        self.radio_communes = self._radio(mode_row, "Codes commune (fichiers complets)", "communes")
-        self.radio_error_ids = self._radio(mode_row, "ID erreur (lignes filtrées)", "error_ids")
-        for radio in (self.radio_communes, self.radio_error_ids):
+        self.mode_radios = [self._radio(mode_row, "Codes commune (fichiers complets)", "communes")]
+        self.mode_radios += [self._radio(mode_row, mode.radio_label, key) for key, mode in FILTER_MODES.items()]
+        for radio in self.mode_radios:
+            radio.pack(side="left", padx=(0, 10))
+
+        self._label(container, "Fichier(s) Excel :", "muted").pack(anchor="w")
+        output_row = tk.Frame(container, bg=PALETTE.bg)
+        output_row.pack(anchor="w", pady=(0, 8))
+        self.var_output = tk.StringVar(value="per_insee")
+        self.output_radios = [
+            self._radio(output_row, "Un fichier par code INSEE", "per_insee", self.var_output),
+            self._radio(output_row, "Un seul fichier pour tout le LOT", "single", self.var_output),
+        ]
+        for radio in self.output_radios:
             radio.pack(side="left", padx=(0, 10))
 
         self.label_input = self._label(container, "", "muted")
@@ -322,9 +383,12 @@ class LotExportWindow(tk.Tk):
             **kwargs,
         )
 
-    def _radio(self, parent: tk.Widget, text: str, value: str) -> tk.Radiobutton:
+    def _radio(self, parent: tk.Widget, text: str, value: str,
+               variable: Optional[tk.StringVar] = None) -> tk.Radiobutton:
+        # sans variable explicite : choix du mode d'export (rafraîchit la zone de saisie)
         return tk.Radiobutton(
-            parent, text=text, value=value, variable=self.var_mode, command=self._on_mode_changed,
+            parent, text=text, value=value, variable=variable or self.var_mode,
+            command=None if variable else self._on_mode_changed,
             bg=PALETTE.bg, fg=PALETTE.text, selectcolor=PALETTE.input_bg,
             activebackground=PALETTE.bg, activeforeground=PALETTE.text,
             disabledforeground=PALETTE.text_dim, highlightthickness=0, cursor="hand2",
@@ -384,15 +448,20 @@ class LotExportWindow(tk.Tk):
     def _set_busy(self, busy: bool) -> None:
         state = "disabled" if busy else "normal"
         for widget in (self.button_run, self.button_root, self.button_downloads,
-                       self.radio_communes, self.radio_error_ids):
+                       *self.mode_radios, *self.output_radios):
             widget.config(state=state)
         for button in (self.button_run, self.button_root, self.button_downloads):
             button.config(bg=button.normal_bg)
         if busy:
             self.button_run.config(bg=PALETTE.accent_disabled)
 
-    def _by_error_ids(self) -> bool:
-        return self.var_mode.get() == "error_ids"
+    def _filter_mode(self) -> Optional[FilterMode]:
+        """Mode filtré sélectionné, ou None pour l'export de fichiers complets par code commune."""
+        return FILTER_MODES.get(self.var_mode.get())
+
+    def _single_file_name(self, lot_dir: Path) -> Optional[str]:
+        """Nom du fichier Excel unique (ex : audit_LOT13.xlsx), ou None pour un fichier par code INSEE."""
+        return f"audit_{lot_dir.name}.xlsx" if self.var_output.get() == "single" else None
 
     def _communes_text(self) -> str:
         return self.textbox_communes.get("1.0", "end-1c")
@@ -403,10 +472,12 @@ class LotExportWindow(tk.Tk):
             self.label_placeholder.place_forget()
         else:
             self.label_placeholder.place(x=9, y=7)
-        if self._by_error_ids():
-            grouped = extract_error_ids(text)
-            nb_ids = sum(len(ids) for ids in grouped.values())
-            self.label_input_count.config(text=f"{nb_ids} ID erreur détecté(s) sur {len(grouped)} commune(s)")
+        mode = self._filter_mode()
+        if mode is not None:
+            grouped = mode.parse(text)
+            nb_values = sum(len(values) for values in grouped.values())
+            self.label_input_count.config(
+                text=f"{nb_values} {mode.unit} détecté(s) sur {len(grouped)} commune(s)")
         else:
             self.label_input_count.config(text=f"{len(extract_commune_codes(text))} code(s) commune détecté(s)")
 
@@ -449,9 +520,10 @@ class LotExportWindow(tk.Tk):
             self._update_input_count()
 
     def _on_mode_changed(self) -> None:
-        if self._by_error_ids():
-            self.label_input.config(text="Collez vos ID erreur (ex : 74143_1, 74143_2) :")
-            self.label_placeholder.config(text="74143_1\n74143_2\n38068_207")
+        mode = self._filter_mode()
+        if mode is not None:
+            self.label_input.config(text=mode.prompt)
+            self.label_placeholder.config(text=mode.placeholder)
         else:
             self.label_input.config(text="Collez vos codes commune :")
             self.label_placeholder.config(text="74143\n38068")
@@ -469,10 +541,11 @@ class LotExportWindow(tk.Tk):
 
     def _on_run_clicked(self) -> None:
         text = self._communes_text()
-        error_ids: Optional[Dict[str, List[str]]] = None
-        if self._by_error_ids():
-            error_ids = extract_error_ids(text)
-            codes = list(error_ids)
+        mode = self._filter_mode()
+        filter_values: Optional[Dict[str, List[str]]] = None
+        if mode is not None:
+            filter_values = mode.parse(text)
+            codes = list(filter_values)
         else:
             codes = extract_commune_codes(text)
         lot_number = self.var_lot.get().strip()
@@ -482,8 +555,7 @@ class LotExportWindow(tk.Tk):
             messagebox.showwarning("Numéro de LOT", "Saisissez un numéro de LOT (ex: 13).", parent=self)
             return
         if not codes:
-            message = ("Aucun ID erreur valide détecté (format attendu : 74143_1)."
-                       if error_ids is not None else "Aucun code commune valide détecté.")
+            message = mode.invalid_message if mode is not None else "Aucun code commune valide détecté."
             messagebox.showwarning("Erreur", message, parent=self)
             return
         if not self.app_config.root_path.is_dir():
@@ -494,17 +566,20 @@ class LotExportWindow(tk.Tk):
                 parent=self,
             )
             return
-        if not self._confirm_run(lot_number, lot_dir, codes):
+        single_file_name = self._single_file_name(lot_dir)
+        if not self._confirm_run(lot_number, lot_dir, codes, single_file_name):
             return
 
         self._clear_log()
         self._set_busy(True)
 
-        self._worker = ExportWorker(self.export_service, lot_number, codes, lot_dir, self._events, error_ids)
+        self._worker = ExportWorker(self.export_service, lot_number, codes, lot_dir, self._events,
+                                    mode, filter_values, single_file_name)
         self._worker.start()
         self._poll_events()
 
-    def _confirm_run(self, lot_number: str, lot_dir: Path, codes: List[str]) -> bool:
+    def _confirm_run(self, lot_number: str, lot_dir: Path, codes: List[str],
+                     single_file_name: Optional[str]) -> bool:
         if lot_dir.is_dir():
             return messagebox.askyesno(
                 "Dossier existant",
@@ -514,7 +589,8 @@ class LotExportWindow(tk.Tk):
             )
         return messagebox.askyesno(
             "Confirmation",
-            f"Créer le dossier LOT{lot_number} et exporter {len(codes)} commune(s) ?\n\n📂 {lot_dir}",
+            f"Créer le dossier LOT{lot_number} et exporter {len(codes)} commune(s)"
+            f"{f' dans un seul fichier ({single_file_name})' if single_file_name else ''} ?\n\n📂 {lot_dir}",
             parent=self,
         )
 
@@ -531,6 +607,9 @@ class LotExportWindow(tk.Tk):
             pass
         messagebox.showinfo(
             "Terminé",
+            (f"✅ LOT{lot_number} créé : {summary.success_count} commune(s) regroupée(s) dans "
+             f"{summary.merged_file.name} !\n\n📂 {lot_dir}")
+            if summary.merged_file is not None else
             f"✅ LOT{lot_number} créé avec {summary.success_count} fichier(s) !\n\n📂 {lot_dir}",
             parent=self,
         )
