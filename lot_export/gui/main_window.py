@@ -199,6 +199,8 @@ class ExportWorker(threading.Thread):
                   f"({summary.exported_rows} ligne(s) Audit)")
         for cause, count in summary.not_exported_by_cause():
             self._log(f"   ⚠️ {count} : {cause.value}")
+        if summary.realigned_formulas:
+            self._log(f"   ℹ️ {summary.realigned_formulas} formule(s) décalée(s) de la source recalée(s) sur leur ligne")
         if self.duplicates:
             self._log(f"   ℹ️ {sum(n - 1 for n in self.duplicates.values())} doublon(s) dans la saisie, exporté(s) une fois")
         if self.invalid_values:

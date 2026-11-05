@@ -24,6 +24,7 @@ lot_export/
 │   ├── excel_merger.py        #   fusion de plusieurs fichiers audit en un seul classeur
 │   ├── export_report.py       #   rapport texte des valeurs non exportées
 │   ├── file_locator.py        #   recherche des fichiers audit_*.xlsx
+│   ├── formula_relocation.py  #   déplacement des formules, recalées sur leur ligne
 │   ├── pending_ids.py         #   liste persistante des ID erreur à rejouer
 │   ├── lot_naming.py          #   construction/validation du nom de dossier LOT
 │   └── export_service.py      #   orchestration de la copie (injectable/mockable)
@@ -83,6 +84,15 @@ fichier unique du LOT sont produits sans filtre actif ni ligne/colonne masquée,
 sur toutes les feuilles (les flèches de filtre restent disponibles). Les
 fichiers source ne sont jamais modifiés. En mode **Codes commune** avec un
 fichier par code INSEE, le fichier reste une copie exacte de la source.
+
+### Formules décalées dans les sources
+
+Dans certains fichiers source, des formules lisent une autre ligne que la leur
+(`BG11` lit la ligne 2). Une formule qui ne lit qu'une seule ligne de sa feuille est
+recalée sur sa ligne dans le fichier exporté : le résultat peut donc différer, à
+juste titre, de celui affiché dans la source. Le journal et le rapport donnent leur
+nombre. Une référence impossible à déplacer devient `#REF!` sans bloquer la commune.
+Les fichiers source ne sont pas corrigés.
 
 ### Contrôle de l'export
 

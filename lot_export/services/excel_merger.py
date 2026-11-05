@@ -16,10 +16,10 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import Cell
-from openpyxl.formula.translate import Translator
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .excel_filter import AUDIT_SHEET, reveal_all
+from .formula_relocation import relocate_formula
 
 HEADER_ROWS = 1
 
@@ -60,8 +60,7 @@ def _same_content(a: Worksheet, b: Worksheet) -> bool:
 def _copy_cell(cell: Cell, target: Cell, style_cache: Dict[tuple, object]) -> None:
     value = cell.value
     if _is_formula(value):
-        # recale les références relatives (ex : J57 -> J3) sur la nouvelle ligne
-        value = Translator(value, origin=cell.coordinate).translate_formula(target.coordinate)
+        value, _realigned = relocate_formula(value, cell.coordinate, target.coordinate)
     target.value = value
     if cell.has_style:
         # les styles ne sont pas partageables entre classeurs : copie attribut par attribut,

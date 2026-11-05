@@ -174,3 +174,55 @@ def test_find_values_raises_when_structure_is_unexpected(tmp_path: Path):
 
     with pytest.raises(ExcelFilterError):
         find_values(tmp_path / "audit.xlsx", ["74143_1"])
+
+
+def _make_shifted_audit(path: Path) -> Path:
+    """Comme les vrais fichiers : la colonne D lit une autre ligne que la sienne."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Audit"
+    ws.append(["INSEE", "Valeur", "ID erreur", "Formule"])
+    formulas = {2: "=B5*2", 3: "=B3*2", 4: "=B2*2", 5: "=B4*2"}
+    for row, formula in formulas.items():
+        ws.append(["74143", row * 10, f"74143_{row}", formula])
+    wb.save(path)
+    return path
+
+
+def test_formula_reading_a_row_above_no_longer_blocks_the_commune(tmp_path: Path):
+    source = _make_shifted_audit(tmp_path / "audit.xlsx")
+
+    result = filter_audit_rows(source, tmp_path / "out.xlsx", ["74143_4"])  # =B2*2 remonté en ligne 2
+
+    assert result.kept_ids == ["74143_4"]
+    assert result.realigned_formulas == 1
+    ws = load_workbook(tmp_path / "out.xlsx")["Audit"]
+    assert [cell.value for cell in ws[2]] == ["74143", 40, "74143_4", "=B2*2"]
+
+
+def test_each_formula_reads_its_own_row_after_export(tmp_path: Path):
+    source = _make_shifted_audit(tmp_path / "audit.xlsx")
+
+    result = filter_audit_rows(source, tmp_path / "out.xlsx", ["74143_2", "74143_3", "74143_5"])
+
+    assert result.realigned_formulas == 2  # 74143_3 lisait déjà sa propre ligne
+    ws = load_workbook(tmp_path / "out.xlsx")["Audit"]
+    assert [ws.cell(row, 4).value for row in range(2, 5)] == ["=B2*2", "=B3*2", "=B4*2"]
+
+
+def test_hyperlink_stays_on_its_row(tmp_path: Path):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Audit"
+    ws.append(["ID erreur", "Lien"])
+    for number in range(1, 4):
+        ws.append([f"74143_{number}", f"lien {number}"])
+        ws.cell(number + 1, 2).hyperlink = f"https://example.org/{number}"
+    wb.save(tmp_path / "audit.xlsx")
+
+    filter_audit_rows(tmp_path / "audit.xlsx", tmp_path / "out.xlsx", ["74143_3"])
+
+    out = load_workbook(tmp_path / "out.xlsx")["Audit"]
+    assert out["B2"].value == "lien 3"
+    assert out["B2"].hyperlink.target == "https://example.org/3"
+    assert out["B2"].hyperlink.ref == "B2"

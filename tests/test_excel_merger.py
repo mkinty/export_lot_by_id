@@ -88,3 +88,22 @@ def test_merged_file_has_no_active_filter_nor_hidden_row(tmp_path: Path):
     assert merged.max_row == 3
     assert not any(dimension.hidden for dimension in merged.row_dimensions.values())
     assert merged.auto_filter.filterColumn == []
+
+
+def test_shifted_formula_of_an_added_file_is_realigned(tmp_path: Path):
+    a = _make_audit(tmp_path / "a.xlsx", "74143", ["74143_1"], template_rows=0)
+    second = Workbook()
+    ws = second.active
+    ws.title = "Audit"
+    ws.append(["INSEE", "Valeur", "ID erreur", "Formule"])
+    for row in range(2, 42):
+        ws.append(["38068", row, f"38068_{row}", f"=B{row}*2"])
+    ws["D41"] = "=B2*2"  # lit 39 lignes plus haut : le décalage sortirait de la feuille en ligne 3
+    second.save(tmp_path / "b.xlsx")
+    for row in range(2, 41):
+        ws.delete_rows(2)
+    second.save(tmp_path / "b.xlsx")
+
+    merge_audit_files([a, tmp_path / "b.xlsx"], tmp_path / "merged.xlsx")
+
+    assert _rows(tmp_path / "merged.xlsx", "Audit")[-1][3] == "=B3*2"

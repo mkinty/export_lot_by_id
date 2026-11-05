@@ -58,6 +58,7 @@ def write_not_exported_report(
         f"({summary.exported_rows} ligne(s) Audit)",
         f"  NON exportées                           : {summary.not_exported_count}",
         f"  Saisies non reconnues, jamais recherchées : {len(invalid_values)}",
+        f"  Formules décalées de la source, recalées sur leur ligne : {summary.realigned_formulas}",
     ]
     causes = summary.not_exported_by_cause()
     if causes:

@@ -19,6 +19,8 @@ from openpyxl.utils import get_column_letter
 from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
+from .formula_relocation import relocate_formula
+
 AUDIT_SHEET = "Audit"
 ERROR_ID_HEADER = "ID erreur"
 ADDRESS_HEADER = "adresse"
@@ -37,6 +39,7 @@ class FilterResult:
     # valeur absente -> explication pour le rapport des valeurs non exportées
     reasons: Dict[str, str] = field(default_factory=dict)
     kept_rows: int = 0
+    realigned_formulas: int = 0  # formules qui lisaient une autre ligne, recalées sur la leur
 
 
 def _normalize(value: object) -> str:
@@ -84,6 +87,19 @@ def _move_row_dimensions(ws: Worksheet, kept_rows: List[int]) -> None:
     for new, dimension in moved.items():
         dimension.index = new
         dimensions[new] = dimension
+
+
+def _prepare_row_move(ws: Worksheet, row: int, target: int) -> int:
+    """Recale formules et liens de la ligne `row` sur `target`, et renvoie le nombre de formules réalignées."""
+    realigned = 0
+    for cell in ws[row]:
+        destination = f"{get_column_letter(cell.column)}{target}"
+        if cell.data_type == "f" and isinstance(cell.value, str):
+            cell.value, was_realigned = relocate_formula(cell.value, cell.coordinate, destination)
+            realigned += was_realigned
+        if cell.hyperlink is not None:  # move_range ne met pas à jour la cellule cible du lien
+            cell.hyperlink.ref = destination
+    return realigned
 
 
 def _explain_missing(ws: Worksheet, missing: Iterable[str], column: str, nb_values: int) -> Dict[str, str]:
@@ -166,9 +182,10 @@ def filter_audit_rows(
         return result
 
     for target, row in enumerate(kept_rows, start=2):
+        # Y compris si la ligne ne bouge pas : sa formule peut lire une ligne qui va disparaître
+        result.realigned_formulas += _prepare_row_move(ws, row, target)
         if row != target:
-            # translate=True réécrit les formules relatives (ex: J57 -> J3) pour la nouvelle ligne
-            ws.move_range(f"A{row}:{last_col}{row}", rows=target - row, translate=True)
+            ws.move_range(f"A{row}:{last_col}{row}", rows=target - row)
     first_unused = len(kept_rows) + 2
     if first_unused <= max_row:
         ws.delete_rows(first_unused, max_row - first_unused + 1)

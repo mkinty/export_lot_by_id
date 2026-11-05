@@ -233,10 +233,12 @@ class ExportService:
                                message=f"aucun(e) {label} trouvé(e) dans {source.name}{missing}",
                                not_exported=not_exported)
 
+        realigned = f" — {result.realigned_formulas} formule(s) recalée(s)" if result.realigned_formulas else ""
         return ExportItem(commune=commune, source=source, destination=destination,
                            status=ExportStatus.SUCCESS,
-                           message=f"{source.name} — {len(result.kept_ids)}/{len(values)} {label}(s){missing}",
-                           exported=tuple(result.kept_ids), not_exported=not_exported, rows=result.kept_rows)
+                           message=f"{source.name} — {len(result.kept_ids)}/{len(values)} {label}(s){missing}{realigned}",
+                           exported=tuple(result.kept_ids), not_exported=not_exported, rows=result.kept_rows,
+                           realigned_formulas=result.realigned_formulas)
 
     def _explain_missing(
         self, commune: str, source: Path, result: FilterResult, column: str,

@@ -48,6 +48,7 @@ class ExportItem:
     exported: tuple[str, ...] = ()
     not_exported: tuple[NotExported, ...] = ()
     rows: int = 0  # lignes Audit exportées : un même ID peut figurer sur plusieurs lignes
+    realigned_formulas: int = 0  # formules qui lisaient une autre ligne, recalées sur la leur
 
     @property
     def ok(self) -> bool:
@@ -81,6 +82,10 @@ class ExportSummary:
     @property
     def exported_rows(self) -> int:
         return sum(item.rows for item in self.items)
+
+    @property
+    def realigned_formulas(self) -> int:
+        return sum(item.realigned_formulas for item in self.items)
 
     @property
     def not_exported_count(self) -> int:
