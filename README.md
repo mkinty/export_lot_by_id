@@ -22,7 +22,9 @@ lot_export/
 │   ├── address_parser.py      #   extraction des adresses <INSEE>_<adresse> groupées par code INSEE
 │   ├── excel_filter.py        #   filtrage des lignes de la feuille Audit (openpyxl)
 │   ├── excel_merger.py        #   fusion de plusieurs fichiers audit en un seul classeur
+│   ├── export_report.py       #   rapport texte des valeurs non exportées
 │   ├── file_locator.py        #   recherche des fichiers audit_*.xlsx
+│   ├── pending_ids.py         #   liste persistante des ID erreur à rejouer
 │   ├── lot_naming.py          #   construction/validation du nom de dossier LOT
 │   └── export_service.py      #   orchestration de la copie (injectable/mockable)
 ├── gui/                       # Présentation uniquement — délègue tout aux services
@@ -72,6 +74,48 @@ d'erreurs) sans jamais ouvrir de fenêtre, ni installer Tkinter/CustomTkinter.
   que l'export par ID erreur, mais sur la colonne `adresse` de la feuille
   `Audit`. La comparaison ignore la casse, les accents et les espaces
   multiples ; toutes les lignes ayant une adresse demandée sont conservées.
+
+### Filtres et lignes masquées
+
+Les recherches portent toujours sur la feuille `Audit` et incluent les lignes
+masquées par un filtre. Les fichiers filtrés (par ID erreur ou adresse) et le
+fichier unique du LOT sont produits sans filtre actif ni ligne/colonne masquée,
+sur toutes les feuilles (les flèches de filtre restent disponibles). Les
+fichiers source ne sont jamais modifiés. En mode **Codes commune** avec un
+fichier par code INSEE, le fichier reste une copie exacte de la source.
+
+### Contrôle de l'export
+
+Une valeur n'est comptée comme exportée qu'après relecture du fichier final.
+Avant l'export, la confirmation annonce les communes sans fichier dans le dossier
+source et le nombre de valeurs concernées. Après l'export, le message de fin et le
+journal donnent le bilan par cause.
+
+S'il y a une valeur non exportée, un doublon ou une saisie non reconnue, le fichier
+`LOTxx/non_exportes_LOTxx.txt` donne le bilan, les causes avec la marche à suivre, et
+la raison de chaque valeur. Il est supprimé par un nouvel export du même LOT sans
+anomalie, pour ne pas laisser un rapport périmé.
+
+Pour une commune, `audit_<commune>.xlsx` est toujours lu en priorité. Une valeur
+absente de ce fichier mais présente dans une autre copie du dossier (conflit OneDrive
+par exemple) n'est pas exportée : elle est signalée, à vous de dire quelle copie est
+à jour.
+
+### ID en attente
+
+Les ID erreur non exportés (fichier verrouillé, OneDrive non synchronisé,
+dossier source erroné...) sont conservés d'un lancement à l'autre dans
+`ids_en_attente.json`, à côté de `config.json`.
+
+- **Charger les ID en attente** les replace dans la zone de saisie, en mode ID
+  erreur, et vide le numéro de LOT. Après l'export, ceux qui ont réussi sont
+  retirés de la liste.
+- **Vider la liste** efface uniquement la liste, aucun fichier Excel n'est modifié.
+
+Utilisez un nouveau numéro de LOT pour rejouer : dans le même LOT, le fichier
+d'une commune (ou le fichier unique) serait remplacé par un fichier ne contenant
+que les ID rejoués. Les saisies au format invalide ne sont pas conservées, car
+elles ne peuvent pas être rejouées telles quelles.
 
 ## Fichier(s) Excel produits
 

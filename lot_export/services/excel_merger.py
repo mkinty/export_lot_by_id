@@ -6,6 +6,7 @@ Pour chaque feuille, les lignes de données des fichiers suivants sont ajoutées
 sous celles du modèle, sans répéter l'en-tête. Les feuilles identiques d'un
 fichier à l'autre (listes déroulantes...) ne sont conservées qu'une fois.
 Les lignes ne contenant que des formules (lignes « modèle » vides) sont ignorées.
+Le fichier fusionné ne garde ni filtre actif ni ligne/colonne masquée.
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from openpyxl.cell.cell import Cell
 from openpyxl.formula.translate import Translator
 from openpyxl.worksheet.worksheet import Worksheet
 
-from .excel_filter import AUDIT_SHEET
+from .excel_filter import AUDIT_SHEET, reveal_all
 
 HEADER_ROWS = 1
 
@@ -40,6 +41,9 @@ def _trim(ws: Worksheet) -> None:
             last = index
     if ws.max_row > last:
         ws.delete_rows(last + 1, ws.max_row - last)
+    # delete_rows laisse les propriétés de ligne : les lignes ajoutées ensuite en hériteraient
+    for row in [row for row in ws.row_dimensions if row > last]:
+        del ws.row_dimensions[row]
 
 
 def _values(ws: Worksheet) -> List[Tuple]:
@@ -98,6 +102,7 @@ def merge_audit_files(sources: Sequence[Path], destination: Path) -> int:
         raise ValueError("aucun fichier à fusionner")
 
     merged = load_workbook(sources[0])
+    reveal_all(merged)
     for ws in merged.worksheets:
         _trim(ws)
 

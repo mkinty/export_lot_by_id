@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from openpyxl import Workbook, load_workbook
 
-from lot_export.services.excel_filter import ExcelFilterError, filter_audit_rows
+from lot_export.services.excel_filter import ExcelFilterError, filter_audit_rows, find_values
 
 
 def _make_audit(path: Path, ids: list) -> Path:
@@ -82,3 +82,95 @@ def test_filters_on_address_column_ignoring_case_accents_and_spaces(tmp_path: Pa
     assert result.missing_ids == ["1 RUE ABSENTE"]
     ids = [row[2] for row in load_workbook(tmp_path / "out.xlsx")["Audit"].iter_rows(min_row=2, values_only=True)]
     assert ids == ["05094_1", "05094_3"]
+
+
+def _make_filtered_audit(path: Path) -> Path:
+    """Fichier tel qu'enregistré par Excel avec un filtre actif : lignes 2 et 4 masquées, colonne B masquée."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Audit"
+    ws.append(["INSEE", "Valeur", "ID erreur"])
+    for number in range(1, 5):
+        ws.append(["74143", number, f"74143_{number}"])
+    ws.auto_filter.ref = "A1:C5"
+    ws.auto_filter.add_filter_column(2, ["74143_2", "74143_4"])
+    ws.row_dimensions[2].hidden = True
+    ws.row_dimensions[4].hidden = True
+    ws.row_dimensions[5].height = 40
+    ws.column_dimensions["B"].hidden = True
+    other = wb.create_sheet("DGFIP")
+    other.append(["Ref"])
+    other.append(["A"])
+    other.auto_filter.ref = "A1:A2"
+    other.auto_filter.add_filter_column(0, ["B"])
+    other.row_dimensions[2].hidden = True
+    wb.save(path)
+    return path
+
+
+def test_rows_hidden_by_a_filter_are_exported_and_visible(tmp_path: Path):
+    source = _make_filtered_audit(tmp_path / "audit.xlsx")
+    destination = tmp_path / "out.xlsx"
+
+    result = filter_audit_rows(source, destination, ["74143_1", "74143_2", "74143_3"])
+
+    assert result.missing_ids == []
+    wb = load_workbook(destination)
+    ws = wb["Audit"]
+    assert [row[2] for row in ws.iter_rows(min_row=2, values_only=True)] == ["74143_1", "74143_2", "74143_3"]
+    assert not any(dimension.hidden for dimension in ws.row_dimensions.values())
+    assert not ws.column_dimensions["B"].hidden
+    assert ws.auto_filter.filterColumn == []
+    assert ws.auto_filter.ref == "A1:C5"  # les flèches de filtre restent disponibles
+    assert not wb["DGFIP"].auto_filter.filterColumn
+    assert not wb["DGFIP"].row_dimensions[2].hidden
+
+
+def test_row_height_follows_its_row(tmp_path: Path):
+    source = _make_filtered_audit(tmp_path / "audit.xlsx")
+    destination = tmp_path / "out.xlsx"
+
+    filter_audit_rows(source, destination, ["74143_4"])  # ligne 5 de la source, hauteur 40
+
+    assert load_workbook(destination)["Audit"].row_dimensions[2].height == 40
+
+
+def test_source_file_is_not_modified(tmp_path: Path):
+    source = _make_filtered_audit(tmp_path / "audit.xlsx")
+    before = source.read_bytes()
+
+    filter_audit_rows(source, tmp_path / "out.xlsx", ["74143_1"])
+
+    assert source.read_bytes() == before
+
+
+def test_missing_value_reason_points_to_cell_holding_it(tmp_path: Path):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Audit"
+    ws.append(["INSEE", "ID erreur", "Remarque"])
+    ws.append(["74143", "74143_1", None])
+    ws.append(["74143", "74143_2, 74143_3", None])
+    ws.append(["74143", "74143_12", None])
+    wb.save(tmp_path / "audit.xlsx")
+
+    result = filter_audit_rows(tmp_path / "audit.xlsx", tmp_path / "out.xlsx", ["74143_1", "74143_3", "74143_9"])
+
+    assert result.missing_ids == ["74143_3", "74143_9"]
+    assert "B3" in result.reasons["74143_3"]
+    assert "absent(e) de la colonne" in result.reasons["74143_9"]
+
+
+def test_find_values_reads_hidden_rows_and_ignores_case(tmp_path: Path):
+    source = _make_filtered_audit(tmp_path / "audit.xlsx")
+
+    assert find_values(source, ["74143_1", "74143_9", "74143_2"]) == ["74143_1", "74143_2"]
+
+
+def test_find_values_raises_when_structure_is_unexpected(tmp_path: Path):
+    wb = Workbook()
+    wb.active.title = "Autre"
+    wb.save(tmp_path / "audit.xlsx")
+
+    with pytest.raises(ExcelFilterError):
+        find_values(tmp_path / "audit.xlsx", ["74143_1"])

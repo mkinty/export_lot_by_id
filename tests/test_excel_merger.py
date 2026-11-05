@@ -63,3 +63,28 @@ def test_single_source_is_trimmed_of_template_rows(tmp_path: Path):
 
     assert merge_audit_files([a], out) == 1
     assert len(_rows(out, "Audit")) == 2
+
+
+def test_merged_file_has_no_active_filter_nor_hidden_row(tmp_path: Path):
+    first = Workbook()
+    ws = first.active
+    ws.title = "Audit"
+    ws.append(["INSEE", "ID erreur"])
+    ws.append(["74143", "74143_1"])
+    ws.auto_filter.ref = "A1:B9"
+    ws.auto_filter.add_filter_column(1, ["autre"])
+    ws.row_dimensions[2].hidden = True
+    ws.row_dimensions[3].hidden = True  # ligne vide supprimée : la ligne ajoutée ne doit pas en hériter
+    first.save(tmp_path / "a.xlsx")
+    second = Workbook()
+    second.active.title = "Audit"
+    second.active.append(["INSEE", "ID erreur"])
+    second.active.append(["38068", "38068_5"])
+    second.save(tmp_path / "b.xlsx")
+
+    merge_audit_files([tmp_path / "a.xlsx", tmp_path / "b.xlsx"], tmp_path / "merged.xlsx")
+
+    merged = load_workbook(tmp_path / "merged.xlsx")["Audit"]
+    assert merged.max_row == 3
+    assert not any(dimension.hidden for dimension in merged.row_dimensions.values())
+    assert merged.auto_filter.filterColumn == []

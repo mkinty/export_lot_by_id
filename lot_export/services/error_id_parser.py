@@ -5,9 +5,11 @@ Un ID erreur a la forme <code INSEE>_<numéro>, ex : 74143_1, 2A004_12.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import Dict, List
 
 ERROR_ID_PATTERN = re.compile(r'\b((?:2[AB]|\d{2})\d{3})_(\d+)\b')
+TOKEN_SEPARATORS = re.compile(r'[\s,;|()\[\]"\']+')
 
 
 def extract_error_ids(text: str) -> Dict[str, List[str]]:
@@ -23,3 +25,15 @@ def extract_error_ids(text: str) -> Dict[str, List[str]]:
         if error_id not in ids:
             ids.append(error_id)
     return grouped
+
+
+def find_invalid_error_ids(text: str) -> List[str]:
+    """Saisies ne contenant aucun ID erreur valide : elles ne seront jamais recherchées."""
+    tokens = (token for token in TOKEN_SEPARATORS.split(text) if token)
+    return list(dict.fromkeys(token for token in tokens if not ERROR_ID_PATTERN.search(token.upper())))
+
+
+def find_duplicate_error_ids(text: str) -> Dict[str, int]:
+    """ID saisis plusieurs fois, avec leur nombre d'occurrences : un doublon n'est exporté qu'une fois."""
+    counts = Counter(f"{insee}_{number}" for insee, number in ERROR_ID_PATTERN.findall(text.upper()))
+    return {error_id: count for error_id, count in counts.items() if count > 1}

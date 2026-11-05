@@ -35,3 +35,9 @@ def extract_addresses(text: str) -> Dict[str, List[str]]:
         if address not in addresses:
             addresses.append(address)
     return grouped
+
+
+def find_invalid_addresses(text: str) -> List[str]:
+    """Lignes sans préfixe <code INSEE>_ : elles ne seront jamais recherchées."""
+    lines = (line.strip(TRIM_CHARS) for line in text.splitlines())
+    return list(dict.fromkeys(line for line in lines if line and not ENTRY_START_PATTERN.search(line.upper())))

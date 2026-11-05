@@ -21,19 +21,30 @@ from typing import Callable, Dict, List, Optional
 
 from PIL import Image, ImageTk
 
-from ..config import AppConfig, save_config
+from ..config import AppConfig, config_file_path, save_config
 from ..models import ExportSummary
-from ..services.address_parser import extract_addresses
+from ..services.address_parser import extract_addresses, find_invalid_addresses
 from ..services.commune_parser import extract_commune_codes
-from ..services.error_id_parser import extract_error_ids
+from ..services.error_id_parser import extract_error_ids, find_duplicate_error_ids, find_invalid_error_ids
+from ..services.export_report import write_not_exported_report
 from ..services.export_service import ExportService
 from ..services.file_locator import AuditFileLocator
 from ..services.lot_naming import build_lot_dir
+from ..services.pending_ids import (
+    PENDING_FILE_NAME,
+    clear_pending,
+    load_pending,
+    update_pending,
+    update_pending_from_summary,
+)
 from .theme import FONTS, LABEL_ROLES, PALETTE, apply_theme
 from ..utils.resources import resource_path
 
 STATUS_ICONS = {"success": "✅", "not_found": "⚠️ ", "error": "❌"}
 POLL_INTERVAL_MS = 50
+PENDING_DETAIL_LIMIT = 15  # nombre d'ID détaillés dans la boîte de dialogue de chargement
+WINDOW_HEIGHT = 880
+SCREEN_MARGIN = 80  # place laissée à la barre de titre et à la barre des tâches
 
 
 @dataclass(frozen=True)
@@ -45,6 +56,8 @@ class FilterMode:
     placeholder: str
     invalid_message: str
     parse: Callable[[str], Dict[str, List[str]]]
+    find_invalid: Callable[[str], List[str]]
+    find_duplicates: Callable[[str], Dict[str, int]]
     export: Callable[[ExportService], Callable[..., ExportSummary]]
 
 
@@ -57,6 +70,8 @@ FILTER_MODES: Dict[str, FilterMode] = {
         placeholder="74143_1\n74143_2\n38068_207",
         invalid_message="Aucun ID erreur valide détecté (format attendu : 74143_1).",
         parse=extract_error_ids,
+        find_invalid=find_invalid_error_ids,
+        find_duplicates=find_duplicate_error_ids,
         export=lambda service: service.export_by_error_ids,
     ),
     "addresses": FilterMode(
@@ -68,6 +83,8 @@ FILTER_MODES: Dict[str, FilterMode] = {
         invalid_message="Aucune adresse valide détectée "
                         "(format attendu : 05094_495 CHEMIN DE PIGE BOUIN 05700 NOSSAGE ET BENEVENT).",
         parse=extract_addresses,
+        find_invalid=find_invalid_addresses,
+        find_duplicates=lambda _text: {},
         export=lambda service: service.export_by_addresses,
     ),
 }
@@ -86,6 +103,9 @@ class ExportWorker(threading.Thread):
             filter_mode: Optional[FilterMode] = None,
             filter_values: Optional[Dict[str, List[str]]] = None,
             single_file_name: Optional[str] = None,
+            invalid_values: Optional[List[str]] = None,
+            pending_file: Optional[Path] = None,
+            duplicates: Optional[Dict[str, int]] = None,
     ):
         super().__init__(daemon=True)
         self.export_service = export_service
@@ -98,6 +118,12 @@ class ExportWorker(threading.Thread):
         self.filter_values = filter_values
         # Si renseigné : toutes les communes sont regroupées dans ce fichier Excel unique
         self.single_file_name = single_file_name
+        # Saisies non reconnues, jamais recherchées mais signalées dans le rapport
+        self.invalid_values = invalid_values or []
+        self.duplicates = duplicates or {}
+        self.report_path: Optional[Path] = None
+        # Si renseigné (export par ID erreur) : liste des ID en attente à tenir à jour
+        self.pending_file = pending_file
 
     def _log(self, message: str) -> None:
         self.events.put(("log", message))
@@ -108,6 +134,7 @@ class ExportWorker(threading.Thread):
         except Exception as exc:  # noqa: BLE001 - l'UI doit toujours être débloquée
             self._log(f"❌ Erreur inattendue : {exc}")
             summary = ExportSummary()
+            self._keep_all_pending(f"erreur inattendue ({exc})")
         self.events.put(("finished", self.lot_number, self.lot_dir, summary))
 
     def _export(self) -> ExportSummary:
@@ -139,7 +166,52 @@ class ExportWorker(threading.Thread):
             self._log(f"📂 {self.lot_dir}")
         else:
             self._log("❌ Aucun fichier copié")
+        if self.filter_mode is not None:
+            self._report_not_exported(summary)
+        self._update_pending(summary)
         return summary
+
+    def _update_pending(self, summary: ExportSummary) -> None:
+        if self.pending_file is None:
+            return
+        try:
+            pending = update_pending_from_summary(self.pending_file, summary)
+        except OSError as exc:
+            self._log(f"❌ Liste des ID en attente impossible à mettre à jour : {exc}")
+            return
+        if pending:
+            self._log(f"⏳ {len(pending)} ID en attente au total, à rejouer avec « Charger les ID en attente »")
+
+    def _keep_all_pending(self, reason: str) -> None:
+        """L'export s'est interrompu sans bilan : tous les ID demandés restent à rejouer."""
+        if self.pending_file is None:
+            return
+        failures = {error_id: reason for values in self.filter_values.values() for error_id in values}
+        try:
+            update_pending(self.pending_file, failures, [])
+        except OSError as exc:
+            self._log(f"❌ Liste des ID en attente impossible à mettre à jour : {exc}")
+
+    def _report_not_exported(self, summary: ExportSummary) -> None:
+        unit = self.filter_mode.unit
+        requested = summary.exported_count + summary.not_exported_count
+        self._log(f"📊 {unit} : {summary.exported_count}/{requested} exporté(s) et vérifié(s) dans le fichier final "
+                  f"({summary.exported_rows} ligne(s) Audit)")
+        for cause, count in summary.not_exported_by_cause():
+            self._log(f"   ⚠️ {count} : {cause.value}")
+        if self.duplicates:
+            self._log(f"   ℹ️ {sum(n - 1 for n in self.duplicates.values())} doublon(s) dans la saisie, exporté(s) une fois")
+        if self.invalid_values:
+            self._log(f"   ⚠️ {len(self.invalid_values)} saisie(s) non reconnue(s), jamais recherchée(s)")
+        try:
+            self.report_path = write_not_exported_report(
+                summary, self.invalid_values, self.duplicates, self.lot_dir, self.lot_number, unit,
+                self.export_service.locator.root_path)
+        except OSError as exc:
+            self._log(f"❌ Rapport de contrôle impossible à écrire : {exc}")
+            return
+        if self.report_path is not None:
+            self._log(f"📝 Détail et explications : {self.report_path}")
 
 
 class Tooltip:
@@ -184,9 +256,11 @@ class LotExportWindow(tk.Tk):
         self.export_service = export_service
         self._worker: Optional[ExportWorker] = None
         self._events: "queue.Queue[tuple]" = queue.Queue()
+        # Dans le dossier de configuration : la liste survit aux redémarrages, même avec l'exécutable
+        self.pending_file = (config_path or config_file_path()).with_name(PENDING_FILE_NAME)
 
         self.title("Export LOT — Projet SNA")
-        self.geometry("760x820")
+        self.geometry(f"760x{min(WINDOW_HEIGHT, self.winfo_screenheight() - SCREEN_MARGIN)}")
         self.minsize(640, 700)
         apply_theme(self)
 
@@ -210,7 +284,8 @@ class LotExportWindow(tk.Tk):
 
         self._build_folders(body).pack(fill="x", pady=(0, 12))
         self._build_lot_input(body).pack(fill="x", pady=(0, 12))
-        self._build_commune_input(body).pack(fill="x", pady=(0, 12))
+        self._build_commune_input(body).pack(fill="x", pady=(0, 6))
+        self._build_pending_row(body).pack(fill="x", pady=(0, 12))
         self._build_action_button(body).pack(fill="x", pady=(0, 10))
         self._build_progress(body).pack(fill="x", pady=(0, 10))
         self._build_log(body).pack(fill="both", expand=True)
@@ -313,7 +388,7 @@ class LotExportWindow(tk.Tk):
                               highlightbackground=PALETTE.border, highlightcolor=PALETTE.accent)
         text_frame.pack(fill="x")
         self.textbox_communes = tk.Text(
-            text_frame, height=6, bg=PALETTE.input_bg, fg=PALETTE.text, insertbackground=PALETTE.text,
+            text_frame, height=5, bg=PALETTE.input_bg, fg=PALETTE.text, insertbackground=PALETTE.text,
             selectbackground=PALETTE.accent, relief="flat", borderwidth=0, padx=8, pady=6, undo=True,
         )
         self.textbox_communes.pack(fill="both", expand=True)
@@ -330,6 +405,20 @@ class LotExportWindow(tk.Tk):
         self.label_input_count.pack(anchor="w", pady=(4, 0))
 
         self._on_mode_changed()
+        return container
+
+    def _build_pending_row(self, parent: tk.Widget) -> tk.Widget:
+        container = tk.Frame(parent, bg=PALETTE.bg)
+        self.label_pending = self._label(container, "", "dim")
+        self.label_pending.pack(side="left")
+        style = dict(bg=PALETTE.input_bg, hover_bg=PALETTE.border, pressed_bg=PALETTE.accent_pressed,
+                     font=FONTS.dim, padx=10, pady=2)
+        self.button_pending_clear = self._button(container, "🗑 Vider la liste", self._on_clear_pending, **style)
+        self.button_pending_clear.pack(side="right", padx=(6, 0))
+        self.button_pending_load = self._button(
+            container, "📋 Charger les ID en attente", self._on_load_pending, **style)
+        self.button_pending_load.pack(side="right")
+        self._update_pending_ui()
         return container
 
     def _build_action_button(self, parent: tk.Widget) -> tk.Widget:
@@ -448,6 +537,7 @@ class LotExportWindow(tk.Tk):
     def _set_busy(self, busy: bool) -> None:
         state = "disabled" if busy else "normal"
         for widget in (self.button_run, self.button_root, self.button_downloads,
+                       self.button_pending_load, self.button_pending_clear,
                        *self.mode_radios, *self.output_radios):
             widget.config(state=state)
         for button in (self.button_run, self.button_root, self.button_downloads):
@@ -476,10 +566,24 @@ class LotExportWindow(tk.Tk):
         if mode is not None:
             grouped = mode.parse(text)
             nb_values = sum(len(values) for values in grouped.values())
+            nb_invalid = len(mode.find_invalid(text))
+            nb_duplicates = sum(count - 1 for count in mode.find_duplicates(text).values())
+            invalid = f" — ⚠️ {nb_invalid} saisie(s) non reconnue(s)" if nb_invalid else ""
+            duplicates = f" — {nb_duplicates} doublon(s) ignoré(s)" if nb_duplicates else ""
             self.label_input_count.config(
-                text=f"{nb_values} {mode.unit} détecté(s) sur {len(grouped)} commune(s)")
+                text=f"{nb_values} {mode.unit} détecté(s) sur {len(grouped)} commune(s){duplicates}{invalid}")
         else:
             self.label_input_count.config(text=f"{len(extract_commune_codes(text))} code(s) commune détecté(s)")
+
+    def _update_pending_ui(self) -> None:
+        count = len(load_pending(self.pending_file))
+        role, text = ("preview-warning", f"⏳ {count} ID en attente") \
+            if count else ("dim", "✓ Aucun ID en attente")
+        fg, font = LABEL_ROLES[role]
+        self.label_pending.config(text=text, fg=fg, font=font)
+        state = "normal" if count else "disabled"
+        self.button_pending_load.config(state=state)
+        self.button_pending_clear.config(state=state)
 
     def _append_log(self, message: str) -> None:
         self.textbox_log.config(state="normal")
@@ -539,12 +643,53 @@ class LotExportWindow(tk.Tk):
         if path is not None:
             self._apply_config(self.app_config.with_downloads_dir(path))
 
+    def _on_load_pending(self) -> None:
+        pending = load_pending(self.pending_file)
+        if not pending:
+            self._update_pending_ui()
+            return
+        self.var_mode.set("error_ids")
+        self._on_mode_changed()
+        self.textbox_communes.delete("1.0", "end")
+        self.textbox_communes.insert("1.0", "\n".join(pending))
+        # Rejouer dans le même LOT remplacerait les fichiers déjà exportés pour ces communes
+        self.var_lot.set("")
+        self.entry_lot.focus_set()
+
+        detail = "\n".join(f"• {error_id} : {info.get('reason', '')} ({info.get('date', '')})"
+                           for error_id, info in list(pending.items())[:PENDING_DETAIL_LIMIT])
+        more = f"\n… et {len(pending) - PENDING_DETAIL_LIMIT} autre(s)" if len(pending) > PENDING_DETAIL_LIMIT else ""
+        messagebox.showinfo(
+            "ID en attente",
+            f"{len(pending)} ID chargé(s) dans la zone de saisie.\n\n{detail}{more}\n\n"
+            "Saisissez un NOUVEAU numéro de LOT puis lancez l'export : ceux qui réussissent "
+            "sont retirés de la liste.",
+            parent=self,
+        )
+
+    def _on_clear_pending(self) -> None:
+        if not messagebox.askyesno(
+            "ID en attente",
+            "Vider la liste des ID en attente ?\n(seule la liste est effacée, aucun fichier Excel n'est modifié)",
+            parent=self,
+        ):
+            return
+        try:
+            clear_pending(self.pending_file)
+        except OSError as exc:
+            messagebox.showwarning("ID en attente", f"Impossible de vider la liste :\n{exc}", parent=self)
+        self._update_pending_ui()
+
     def _on_run_clicked(self) -> None:
         text = self._communes_text()
         mode = self._filter_mode()
         filter_values: Optional[Dict[str, List[str]]] = None
+        invalid_values: List[str] = []
+        duplicates: Dict[str, int] = {}
         if mode is not None:
             filter_values = mode.parse(text)
+            invalid_values = mode.find_invalid(text)
+            duplicates = mode.find_duplicates(text)
             codes = list(filter_values)
         else:
             codes = extract_commune_codes(text)
@@ -567,49 +712,86 @@ class LotExportWindow(tk.Tk):
             )
             return
         single_file_name = self._single_file_name(lot_dir)
-        if not self._confirm_run(lot_number, lot_dir, codes, single_file_name):
+        if not self._confirm_run(lot_number, lot_dir, codes, single_file_name, filter_values):
             return
 
         self._clear_log()
         self._set_busy(True)
 
         self._worker = ExportWorker(self.export_service, lot_number, codes, lot_dir, self._events,
-                                    mode, filter_values, single_file_name)
+                                    mode, filter_values, single_file_name, invalid_values,
+                                    self.pending_file if mode is FILTER_MODES["error_ids"] else None,
+                                    duplicates)
         self._worker.start()
         self._poll_events()
 
-    def _confirm_run(self, lot_number: str, lot_dir: Path, codes: List[str],
-                     single_file_name: Optional[str]) -> bool:
+    def _missing_files_warning(self, codes: List[str], filter_values: Optional[Dict[str, List[str]]]) -> str:
+        """Annonce avant l'export les communes sans fichier : leurs valeurs ne pourront pas être exportées."""
+        missing = [code for code in codes if self.export_service.locator.find(code) is None]
+        if not missing:
+            return ""
+        lost = ""
+        if filter_values is not None:
+            nb_lost = sum(len(filter_values[code]) for code in missing)
+            nb_total = sum(len(values) for values in filter_values.values())
+            lost = f" : {nb_lost} valeur(s) sur {nb_total} ne seront PAS exportées"
+        examples = ", ".join(missing[:8]) + (", …" if len(missing) > 8 else "")
+        return (f"⚠️ {len(missing)} commune(s) sur {len(codes)} sans fichier audit dans le dossier source"
+                f"{lost}.\nDossier source : {self.app_config.root_path}\nCommunes : {examples}\n\n")
+
+    def _confirm_run(self, lot_number: str, lot_dir: Path, codes: List[str], single_file_name: Optional[str],
+                     filter_values: Optional[Dict[str, List[str]]] = None) -> bool:
+        warning = self._missing_files_warning(codes, filter_values)
         if lot_dir.is_dir():
-            return messagebox.askyesno(
-                "Dossier existant",
-                f"Le dossier LOT{lot_number} existe déjà :\n{lot_dir}\n\n"
-                "Les fichiers seront ajoutés/écrasés dedans. Continuer ?",
-                parent=self,
-            )
-        return messagebox.askyesno(
-            "Confirmation",
-            f"Créer le dossier LOT{lot_number} et exporter {len(codes)} commune(s)"
-            f"{f' dans un seul fichier ({single_file_name})' if single_file_name else ''} ?\n\n📂 {lot_dir}",
-            parent=self,
-        )
+            title = "Dossier existant"
+            intro = f"Le dossier LOT{lot_number} existe déjà :\n{lot_dir}\n\n"
+            if filter_values is not None:
+                warning += ("⚠️ Un fichier déjà présent pour une même commune (ou le fichier unique du LOT) sera "
+                            "REMPLACÉ et ne contiendra que la saisie actuelle : les lignes exportées auparavant "
+                            "y seront perdues.\n\n")
+                message = f"{intro}{warning}Continuer ?"
+            else:
+                message = f"{intro}{warning}Les fichiers seront ajoutés/écrasés dedans. Continuer ?"
+        else:
+            title = "Confirmation"
+            target = f" dans un seul fichier ({single_file_name})" if single_file_name else ""
+            message = (f"{warning}Créer le dossier LOT{lot_number} et exporter {len(codes)} commune(s)"
+                       f"{target} ?\n\n📂 {lot_dir}")
+        options = {"icon": "warning", "default": "no"} if warning else {}
+        return messagebox.askyesno(title, message, parent=self, **options)
+
+    @staticmethod
+    def _export_control_note(summary: ExportSummary, report_path: Optional[Path]) -> str:
+        """Bilan affiché en fin d'export : le journal peut être trop petit pour le voir."""
+        requested = summary.exported_count + summary.not_exported_count
+        if not requested:
+            return f"\n\n📝 Voir le rapport :\n{report_path}" if report_path else ""
+        lines = [f"\n\n📊 {summary.exported_count}/{requested} exporté(s), vérifié(s) dans le fichier final."]
+        lines += [f"⚠️ {count} : {cause.value}" for cause, count in summary.not_exported_by_cause()]
+        if report_path:
+            lines.append(f"\n📝 Liste et explications :\n{report_path}")
+        return "\n".join(lines)
 
     def _on_export_finished(self, lot_number: str, lot_dir: Path, summary: ExportSummary) -> None:
+        report_path = self._worker.report_path if self._worker is not None else None
+        report_note = self._export_control_note(summary, report_path)
         self._worker = None
         self._set_busy(False)
         self._update_preview()
+        self._update_pending_ui()
         if not summary.has_success:
-            messagebox.showwarning("Terminé", "Aucun fichier copié. Voir le journal.", parent=self)
+            messagebox.showwarning("Terminé", f"Aucun fichier copié. Voir le journal.{report_note}", parent=self)
             return
         try:
             os.startfile(lot_dir)  # Windows uniquement
         except (AttributeError, OSError):
             pass
-        messagebox.showinfo(
+        notify = messagebox.showwarning if summary.not_exported_count else messagebox.showinfo
+        notify(
             "Terminé",
             (f"✅ LOT{lot_number} créé : {summary.success_count} commune(s) regroupée(s) dans "
-             f"{summary.merged_file.name} !\n\n📂 {lot_dir}")
+             f"{summary.merged_file.name} !\n\n📂 {lot_dir}{report_note}")
             if summary.merged_file is not None else
-            f"✅ LOT{lot_number} créé avec {summary.success_count} fichier(s) !\n\n📂 {lot_dir}",
+            f"✅ LOT{lot_number} créé avec {summary.success_count} fichier(s) !\n\n📂 {lot_dir}{report_note}",
             parent=self,
         )

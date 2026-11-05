@@ -4,6 +4,7 @@ Simples dataclasses, sans dépendance externe : faciles à instancier dans les t
 """
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -16,6 +17,25 @@ class ExportStatus(str, Enum):
     ERROR = "error"
 
 
+class NotExportedCause(str, Enum):
+    """Catégorie de cause, pour compter les valeurs non exportées dans le bilan."""
+    NO_FILE = "Fichier audit introuvable dans le dossier source"
+    VALUE_ABSENT = "Absent du fichier audit de la commune"
+    IN_OTHER_FILE = "Présent uniquement dans une autre copie du fichier audit"
+    FILE_INACCESSIBLE = "Fichier audit inaccessible (verrouillé ou non synchronisé)"
+    FILE_INVALID = "Fichier audit illisible ou de structure inattendue"
+    MERGE_FAILED = "Fusion dans le fichier unique impossible"
+    NOT_IN_OUTPUT = "Absent du fichier final lors du contrôle"
+
+
+@dataclass(frozen=True)
+class NotExported:
+    """Valeur demandée (ID erreur, adresse) absente de l'export, avec la raison."""
+    value: str
+    reason: str
+    cause: NotExportedCause = NotExportedCause.VALUE_ABSENT
+
+
 @dataclass(frozen=True)
 class ExportItem:
     """Résultat de l'export d'une commune."""
@@ -24,6 +44,10 @@ class ExportItem:
     destination: Optional[Path] = None
     status: ExportStatus = ExportStatus.NOT_FOUND
     message: str = ""
+    # Export filtré uniquement : valeurs demandées réparties entre exportées et non exportées
+    exported: tuple[str, ...] = ()
+    not_exported: tuple[NotExported, ...] = ()
+    rows: int = 0  # lignes Audit exportées : un même ID peut figurer sur plusieurs lignes
 
     @property
     def ok(self) -> bool:
@@ -49,3 +73,20 @@ class ExportSummary:
     @property
     def has_success(self) -> bool:
         return self.success_count > 0
+
+    @property
+    def exported_count(self) -> int:
+        return sum(len(item.exported) for item in self.items)
+
+    @property
+    def exported_rows(self) -> int:
+        return sum(item.rows for item in self.items)
+
+    @property
+    def not_exported_count(self) -> int:
+        return sum(len(item.not_exported) for item in self.items)
+
+    def not_exported_by_cause(self) -> list[tuple[NotExportedCause, int]]:
+        """Nombre de valeurs non exportées par cause, de la plus fréquente à la moins fréquente."""
+        counts = Counter(entry.cause for item in self.items for entry in item.not_exported)
+        return counts.most_common()

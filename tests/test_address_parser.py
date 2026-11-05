@@ -1,4 +1,4 @@
-from lot_export.services.address_parser import extract_addresses
+from lot_export.services.address_parser import extract_addresses, find_invalid_addresses
 
 
 def test_parses_example_entry():
@@ -34,3 +34,8 @@ def test_inner_commas_are_kept_and_duplicates_removed():
 
 def test_ignores_entries_without_address():
     assert extract_addresses("05094_ \n74143 rue sans code") == {}
+
+
+def test_find_invalid_lists_lines_without_insee_prefix():
+    text = "05094_495 CHEMIN DE PIGE\n3 RUE SANS PREFIXE\n\n74143_12 RUE DES ALPES"
+    assert find_invalid_addresses(text) == ["3 RUE SANS PREFIXE"]
